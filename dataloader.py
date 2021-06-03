@@ -31,6 +31,7 @@ class dataloader():
         tags = tags_df.tag.unique()
 
         tags_rating_sum = dict.fromkeys(tags, 0)
+        print("making sentiment tags_df")
         for tag in tqdm(tags_rating_sum):
             for index, row in tags_ratings_df.iterrows():
                 if row["tag"] == tag:
@@ -67,9 +68,14 @@ class dataloader():
         #extract year
         movies_df['year'] = movies_df.title.str.extract('(\(\d\d\d\d\))').astype("str")
         movies_df['year'] = movies_df['year'].apply(lambda x: x.replace("(", "").replace(")", ""))
-        movies_df.year = movies_df.year.astype("float32").astype("int32")
+        movies_df.year = movies_df.year.astype("float32")
+        movies_df.year = movies_df.year.fillna(0)
         movies_df.drop(movies_df[movies_df.year == 0].index, inplace=True)
+        movies_df.year = movies_df.year.astype("int32")
         movies_df.drop("title", axis=1, inplace=True)
+
+
+
         #make year categorical feature
         bins = list(range(1900, 2021, 20))
         labels = list(range(len(bins) - 1))
@@ -135,25 +141,25 @@ class dataloader():
 
         # self.embedding_cols = ["userId","movieId"]
 
-    def make_binary_set(self,with_cross_var=True,test_size=0.1):
+    def make_binary_set(self,test_size=0.1):
         binary_target_df = self.target_df.apply(lambda x: np.where(x < 4.0, 0, 1))
-        if with_cross_var == False:
-            X_without_cross_var = self.X.iloc[:, :28]
-            self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X_without_cross_var, binary_target_df,
-                                                                                    test_size=0.1)
-            return self.X_train, self.X_test, self.y_train, self.y_test
-        self. X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.X, binary_target_df, test_size=test_size)
 
-        return self.X_train,self.X_test,self.y_train,self.y_test
+        self.X_wide_train, self.X_wide_test, self.y_train, self.y_test = train_test_split(self.X, binary_target_df, test_size=test_size)
 
+        self.X_deep_train = self.X_wide_train.iloc[:, :28]
+        self.X_deep_test = self.X_wide_test.iloc[:, :28]
+
+        return self.X_wide_train,self.X_deep_train,self.X_wide_test,self.X_deep_test,self.y_train,self.y_test
 
 
-    def make_regression_set(self,with_cross_var=True,test_size=0.1):
-        if with_cross_var == False:
-            X_without_cross_var = self.X.iloc[:, :28]
-            self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X_without_cross_var, self.target_df,
-                                                                                    test_size=0.1)
-            return self.X_train, self.X_test, self.y_train, self.y_test
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.X, self.target_df, test_size=test_size)
 
-        return self.X_train, self.X_test, self.y_train, self.y_test
+    def make_regression_set(self,test_size=0.1):
+
+        self.X_wide_train, self.X_wide_test, self.y_train, self.y_test = train_test_split(self.X, self.target_df,
+                                                                                          test_size=test_size)
+
+        self.X_deep_train = self.X_wide_train.iloc[:, :28]
+        self.X_deep_test = self.X_wide_test.iloc[:, :28]
+
+        return self.X_wide_train, self.X_deep_train, self.X_wide_test, self.X_deep_test, self.y_train, self.y_test
+

@@ -4,26 +4,28 @@ import tensorflow as tf
 from tensorflow import keras
 import dataloader
 import argparse
+import matplotlib.pyplot as plt
+from datetime import datetime
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NeuralMF.")
-    parser.add_argument('--path', nargs='?', default='/dataset/',
+    parser.add_argument('--path', nargs='?', default='./datasets/',
                         help='Input data path.')
-    parser.add_argument('--dataset', nargs='?', default='ratings.csv',
+    parser.add_argument('--dataset', nargs='?', default='movielens',
                         help='Choose a dataset.')
-    parser.add_argument('--layers', nargs='+', default=[64,32,16,8],
-                        help='num of layers and nodes of each layer. embedding size is (2/1st layer) ')
-    parser.add_argument('--num_factors', type=int, default=8,
-                        help='Embedding size of MF model.')
+    parser.add_argument('--layers', nargs='+', default=[1024,512,256],
+                        help='num of layers and nodes of each layer ')
+
     parser.add_argument('--epochs', type=int, default=10,
                         help='Number of epochs.')
+    parser.add_argument('--test_size', type=float, default=0.1,
+                        help='test_size.')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size.')
-    parser.add_argument('--gmf_regs', type=float, default=0,
-                        help='Regularization for MF embeddings.')
-    parser.add_argument('--mlp_regs', nargs='+', default=[0,0,0,0],
-                        help="Regularization for user and item embeddings.")
+    parser.add_argument('--deep_regs', nargs='+', default=[0,0,0],
+                        help="Regularization for deep")
+
     parser.add_argument('--lr', type=float, default=0.001,
                         help='Learning rate.')
     parser.add_argument('--learner', nargs='?', default='adam',
@@ -32,46 +34,87 @@ def parse_args():
                         help='Whether to save the trained model.(1 or 0)')
     parser.add_argument('--patience', type=int, default=10,
                         help='earlystopping patience')
-    parser.add_argument('--pretrain_gmf', nargs='?', default='',
-                        help='')
-    parser.add_argument('--pretrain_mlp', nargs='?', default='',
-                        help='Specify the pretrain model file for MLP part. If empty, no pretrain will be used')
-    parser.add_argument('--alpha', type=float, default=0.5,
-                        help='pretrain trade off between GMF:alpha || MLP:1-alpha ')
+
     return parser.parse_args()
 
 
-class wide_deep():
-    def __init__(self, X_wide,y_wide,X_deep,y_deep):
-        wide_input = keras.layers.Input(shape = X_wide.shape[1],
-                                        name="wide_input")
+class wide_deep(keras.Model):
+    def __init__(self, layers = [1024,512,256], deep_regs= [0,0,0],**kwargs):
+        super().__init__(**kwargs)
+        self.num_layers=  len(layers)
+        self.n_neuron = list(map(int,layers))
+        self.deep_regs = list(map(float, deep_regs))
+        self.layers_list = []
+        for index in range(self.num_layers):
+            layer = keras.layers.Dense(self.n_neuron[index], kernel_regularizer=keras.regularizers.l2(self.deep_regs[index]),
+                                       activation=keras.activations.relu,
+                                       name=f'layer{index}')
+            self.layers_list.append(layer)
+        self.wide_deep_output = keras.layers.Dense(1, activation='sigmoid', name='wide_deep_output')
 
+    def call(self,inputs):
 
+        wide_input, deep_input = inputs
+        deep_result = deep_input
+        for layer in self.layers_list:
+            deep_result = layer(deep_result)
 
+        concat_wide_deep = keras.layers.concatenate([wide_input,deep_result])
 
-        deep_input = keras.layers.Input(shape = X_deep.shape[1],
-                                        name="deep_input")
+        wide_deep_output = self.wide_deep_output(concat_wide_deep)
 
-
-
-
+        return  wide_deep_output
 
 
 if __name__ == "__main__":
     args = parse_args()
     layers = args.layers
-    num_factors = args.num_factors
-    mlp_regs = args.mlp_regs
-    gmf_regs = args.gmf_regs
+    deep_regs = args.deep_regs
     learner = args.learner
     learning_rate = args.lr
     epochs = args.epochs
     batch_size = args.batch_size
     patience = args.patience
-    pretrain_gmf = args.pretrain_gmf
-    pretrain_mlp = args.pretrain_mlp
-    alpha = args.alpha
+    test_size = args.test_size
 
-    loader = dataloader.dataloader()
 
+    #wide inputs,deep inputs
+    loader = dataloader.dataloader(args.path + args.dataset)
+    X_wide_train,X_deep_train,X_wide_test,X_deep_test,y_train,y_test = loader.make_binary_set(test_size=test_size)
+
+    print(X_wide_train.shape)
+    print(X_deep_train.shape)
+
+    model = wide_deep(layers = layers, deep_regs=deep_regs)
+
+    if learner.lower() == "adagrad":
+        model.compile(optimizer=keras.optimizers.Adagrad(lr=learning_rate), loss= keras.losses.binary_crossentropy,
+                      metrics=[keras.metrics.BinaryAccuracy()])
+    elif learner.lower() == "rmsprop":
+        model.compile(optimizer=keras.optimizers.RMSprop(lr=learning_rate), lloss= keras.losses.binary_crossentropy,
+                      metrics=[keras.metrics.BinaryAccuracy()])
+    elif learner.lower() == "adam":
+        model.compile(optimizer=keras.optimizers.Adam(lr=learning_rate), loss= keras.losses.binary_crossentropy,
+                      metrics=[keras.metrics.BinaryAccuracy()])
+    else:
+        model.compile(optimizer=keras.optimizers.SGD(lr=learning_rate), loss= keras.losses.binary_crossentropy,
+                      metrics=[keras.metrics.BinaryAccuracy()])
+
+    early_stopping_callback = keras.callbacks.EarlyStopping(patience=patience,restore_best_weights=True)
+    model_out_file = 'wide_deep%s.h5' % (datetime.now().strftime('%Y-%m-%d-%h-%m-%s'))
+    model_check_cb = keras.callbacks.ModelCheckpoint(model_out_file, save_best_only=True)
+
+    if args.out:
+        history = model.fit([X_wide_train, X_deep_train], y_train, batch_size=batch_size, epochs=epochs,
+                            validation_data=([X_wide_test, X_deep_test], y_test), callbacks=[early_stopping_callback,
+                                                                                             model_check_cb]
+                            )
+    else:
+        history = model.fit([X_wide_train, X_deep_train], y_train, batch_size=batch_size, epochs=epochs,
+                            validation_data=([X_wide_test, X_deep_test], y_test), callbacks=[early_stopping_callback]
+                            )
+
+
+    pd.DataFrame(history.history).plot()
+    plt.show()
 
