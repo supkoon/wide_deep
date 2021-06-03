@@ -10,6 +10,8 @@ from tqdm import tqdm
 
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
 
 class dataloader():
     def __init__(self,path):
@@ -17,9 +19,41 @@ class dataloader():
 
 
         #load csv file
-
+        tags_df = pd.read_csv(os.path.join(path, "tags.csv"), encoding='utf-8')
         ratings_df = pd.read_csv(os.path.join(path, "ratings.csv"), encoding='utf-8')
         movies_df = pd.read_csv(os.path.join(path, 'movies.csv'), encoding='utf-8')
+
+        #tags sentiment score
+        tag_value_count = tags_df["tag"].value_counts()
+        # num over 3 tags
+        tags_df['tag'] = tags_df["tag"].apply(lambda x: np.where(tag_value_count[x] >= 3, x, None))
+        tags_ratings_df = pd.merge(tags_df, ratings_df, on=["movieId", "userId"])
+        tags = tags_df.tag.unique()
+
+        tags_rating_sum = dict.fromkeys(tags, 0)
+        for tag in tqdm(tags_rating_sum):
+            for index, row in tags_ratings_df.iterrows():
+                if row["tag"] == tag:
+                    tags_rating_sum[tag] += row["rating"]
+        tags_rating_sum.pop(None)
+
+        tags_sentiment_score = tags_rating_sum
+        for tag, score_sum in tqdm(tags_sentiment_score.items()):
+            tags_sentiment_score[tag] = score_sum / tag_value_count[tag]
+
+        # tags_df 에 감성점수 추가
+        tags_df["sentiment"] = 0.0
+
+        for index, row in tags_df.iterrows():
+            tag = row["tag"]
+            if (tag in tags_sentiment_score):
+                tags_df.at[index, "sentiment"] = tags_sentiment_score[tag]
+
+        movie_sentiment_avg_df = tags_df.groupby("movieId").mean()["sentiment"]
+        ratings_sentiment_df = pd.merge(ratings_df, movie_sentiment_avg_df, how="left", on=["movieId"])
+
+        ratings_sentiment_df = ratings_sentiment_df.fillna(0)
+
 
         #genre dummy
         genres_onehot_df = movies_df.genres.str.get_dummies("|")
@@ -28,6 +62,8 @@ class dataloader():
 
         #genre onehot added
         movies_df = pd.concat([movies_df, genres_onehot_df], axis=1)
+        movies_df = movies_df.drop((movies_df[movies_df["(no genres listed)"] == 1]).index, axis=0)
+        movies_df.drop("(no genres listed)", axis=1, inplace=True)
         #extract year
         movies_df['year'] = movies_df.title.str.extract('(\(\d\d\d\d\))').astype("str")
         movies_df['year'] = movies_df['year'].apply(lambda x: x.replace("(", "").replace(")", ""))
@@ -43,8 +79,18 @@ class dataloader():
         year_level_df = pd.cut(movies_df.year, bins, labels=year_label, right=False)
         movies_df["year_level"] = year_level_df
         year_onehot_df = movies_df.year_level.astype('str').str.get_dummies()
-        #year added
         movies_df = pd.concat([movies_df, year_onehot_df], axis=1)
+
+
+        #num rated per user, per movie
+        user_ratings_count_df = ratings_sentiment_df.groupby("userId")["timestamp"].count()
+        movie_ratings_count_df = ratings_sentiment_df.groupby("movieId").count()["userId"]
+        ratings_sentiment_df = pd.merge(ratings_sentiment_df, user_ratings_count_df, on="userId")
+        ratings_sentiment_df = pd.merge(ratings_sentiment_df, movie_ratings_count_df, on="movieId")
+        ratings_sentiment_df = ratings_sentiment_df.rename(
+            columns={"userId_x": "userId", "timestamp_x": "timestamp", "timestamp_y": "user_num_rated",
+                     "userId_y": "movie_num_rated"})
+
 
 
         #cross feature
@@ -63,17 +109,31 @@ class dataloader():
         movies_df.drop(["genres", "cross_var", "year", "year_level"], axis=1, inplace=True)
 
 
-        #merge ratings_df with final_movies_df
+        #merge final concatenated dataset
 
-        ratings_df = pd.merge(ratings_df, movies_df, "inner", on="movieId")
+        concated_ratings_df = pd.merge(ratings_sentiment_df, movies_df, "inner", on="movieId")
 
-        ratings_df.drop('timestamp', axis=1, inplace=True)
+        concated_ratings_df.drop('timestamp', axis=1, inplace=True)
+        #sentiment 0인 row 제거
+        concated_ratings_df = concated_ratings_df.drop(concated_ratings_df[concated_ratings_df.sentiment == 0].index,
+                                                       axis=0)
 
-        self.target_df = ratings_df["rating"]
 
-        ratings_df.drop("rating", axis=1, inplace=True)
-        self.X = ratings_df
 
+        self.target_df = concated_ratings_df["rating"]
+
+        concated_ratings_df.drop("rating", axis=1, inplace=True)
+        #drop userId , movieId
+        concated_ratings_df_without_user_movie = concated_ratings_df.drop(["userId", "movieId"], axis=1)
+
+
+        #scaling continuous cols
+        scaler = StandardScaler()
+        concated_ratings_df_without_user_movie[["user_num_rated", "movie_num_rated"]] = scaler.fit_transform(
+            concated_ratings_df_without_user_movie[["user_num_rated", "movie_num_rated"]])
+        self.X = concated_ratings_df_without_user_movie
+
+        # self.embedding_cols = ["userId","movieId"]
 
     def make_binary_set(self,with_cross_var=True,test_size=0.1):
         binary_target_df = self.target_df.apply(lambda x: np.where(x < 4.0, 0, 1))
